@@ -2,9 +2,14 @@
 
 namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Controllers;
 
+[Route("/[controller]")]
+public abstract class ApiController : ControllerBase
+{
+    
+}
+
 [ApiController]
-[Route("[controller]")]
-public class UserController : ControllerBase
+public class UserController : ApiController
 {
     private readonly List<string> users = new() {
         "Tom", "Frank", "Nelly", "Tobias"
@@ -13,8 +18,12 @@ public class UserController : ControllerBase
     [HttpGet(Name = "GetUsers")]
     public IEnumerable<string> Get() => users;
 
-    [HttpGet]
-    public string? GetUser(int Id) => Id >= 0 && Id < users.Count ? users[Id] : null;
+    [HttpGet("{userId:int}")]
+    public string? GetUser(int userId) => userId >= 0 && userId < users.Count ? users[userId] : null;
+
+    [HttpGet("{userId:int}")]
+    public Task Log(int userId, [FromServices] ILogger<UserController> logger) =>
+        Task.CompletedTask; 
 
     [HttpPost]
     public int GetUser([FromBody] string user) {

@@ -20,5 +20,7 @@ namespace GoLive.Generator.ApiClientGenerator
         public string PrefixUrl { get; set; }
 
         public bool UseResponseWrapper { get; set; }
+        public bool IncludeResponseWrapper { get; set; }
+        public string ResponseWrapperType { get; set; }
     }
 }

@@ -81,6 +81,7 @@ namespace GoLive.Generator.ApiClientGenerator
             source.AppendLine("using System.Net.Http;");
             source.AppendLine("using System.Threading.Tasks;");
             source.AppendLine("using System.Net.Http.Json;");
+            source.AppendLine("using System.Text.Json;");
             source.AppendLine("using System.Collections.Generic;");
             source.AppendLine("using System.Threading;");
             source.AppendLine("using System.Diagnostics.CodeAnalysis;");
@@ -220,33 +221,15 @@ namespace GoLive.Generator.ApiClientGenerator
                 }
 
                 string useCustomFormatter = config.CustomDiscriminator;
-                
-                string routeValue = string.Empty;
 
-                if (!string.IsNullOrWhiteSpace(action.Route))
-                {
-                    // TODO need to replace params
-                    routeValue = action.Route;
-                }
-                else
-                {
-                    if (controllerRoute.Area != null && !string.IsNullOrWhiteSpace(controllerRoute.Area))
-                    {
-                        routeValue = $"/{controllerRoute.Area}/{controllerRoute.Name}/{action.Name}";
-                    }
-                    else
-                    {
-                        routeValue = $"/{controllerRoute.Name}/{action.Name}";
-                    }
-
-                    if (!routeValue.ToLower().EndsWith("{id}"))
-                    {
-                        if (action.Mapping.FirstOrDefault(e => e.Key.ToLower() == "id") != null)
-                        {
-                            routeValue = $"{routeValue}/{{{action.Mapping.FirstOrDefault(e => e.Key.ToLower() == "id")?.Key}}}";
-                        }
-                    }
-                }
+                string routeValue = action.Route switch {
+                    { Length: > 0 } route when route[0] is '/' or '~' => route,
+                    { } route => $"{controllerRoute.BaseRoute?.TrimEnd('/')}/{route}",
+                    null when controllerRoute.BaseRoute is not null => controllerRoute.BaseRoute,
+                    null when controllerRoute.Area is null => "/[area]/[controller]/[action]",
+                    _ => "/[controller]/[action]"
+                };
+                routeValue = ReplaceRouteParams(routeValue, action, controllerRoute);
 
                 routeValue = routeValue.TrimStart('~');
                 routeValue = routeValue.Replace("*", ""); // TODO - to remove greedy url params
@@ -273,10 +256,10 @@ namespace GoLive.Generator.ApiClientGenerator
                     : $"{action.ReturnTypeName}?";
 
                 var returnType = config.UseResponseWrapper switch {
-                    true when action.ReturnTypeName is null => "Task<Response>",
-                    true => $"Task<Response<{action.ReturnTypeName}>>",
+                    true when action.ReturnTypeName is null  => $"Task<{config.ResponseWrapperType}>",
+                    true                                     => $"Task<{config.ResponseWrapperType}<{action.ReturnTypeName}>>",
                     false when action.ReturnTypeName is null => "Task",
-                    false => $"Task<{nullableReturnType}>"
+                    false                                    => $"Task<{nullableReturnType}>"
                 };
 
                 source.AppendLine(string.IsNullOrWhiteSpace(parameterList)
@@ -285,11 +268,13 @@ namespace GoLive.Generator.ApiClientGenerator
 
                 source.AppendOpenCurlyBracketLine();
 
-                if (action.Mapping.Any(f => f.Key.ToLower() != "id" && action.Body?.Key != f.Key))
+                var queryStringParams = action.Mapping
+                    .Where(m => !routeValue.Contains($"{{{m.Key}}}") && action.Body?.Key != m.Key).ToList();
+                if (queryStringParams.Count > 0)
                 {
                     source.AppendLine("Dictionary<string, string> queryString=new();");
 
-                    foreach (var parameterMapping in action.Mapping.Where(f => f.Key != "Id" && action.Body?.Key != f.Key))
+                    foreach (var parameterMapping in queryStringParams)
                     {
                         if (parameterMapping.Parameter.FullTypeName == "string")
                         {
@@ -320,48 +305,47 @@ namespace GoLive.Generator.ApiClientGenerator
 
                 if (containsFileUpload)
                 {
-                    callStatement = $"await _client.{methodString}Async({routeString}, multiPartContent, cancellationToken: _token);";
+                    callStatement = $"_client.{methodString}Async({routeString}, multiPartContent, cancellationToken: _token)";
                 }
-                else if (action.Body is { Key: var key })
-                {
-                    if (string.IsNullOrWhiteSpace(useCustomFormatter))
-                    {
-                        callStatement = $"await _client.{methodString}AsJsonAsync({routeString}, {key}, cancellationToken: _token);";
-                    }
-                    else
-                    {
-                        callStatement = $"await _client.{methodString}AsJsonAsync({routeString}, {key}, {useCustomFormatter}, cancellationToken: _token);";
-                    }
+                else if (action.Body is { Key: var key }) {
+                    callStatement = string.IsNullOrWhiteSpace(useCustomFormatter)
+                        ? $"_client.{methodString}AsJsonAsync({routeString}, {key}, cancellationToken: _token)"
+                        : $"_client.{methodString}AsJsonAsync({routeString}, {key}, {useCustomFormatter}, cancellationToken: _token)";
                 }
                 else if (methodString == "Post")
                 {
-                    callStatement = $"await _client.{methodString}AsJsonAsync({routeString}, new {{}}, cancellationToken: _token);";
+                    callStatement = $"_client.{methodString}AsJsonAsync({routeString}, new {{}}, cancellationToken: _token)";
                 }
                 else
                 {
-                    callStatement = $"await _client.{methodString}Async({routeString}, cancellationToken: _token);";
+                    callStatement = $"_client.{methodString}Async({routeString}, cancellationToken: _token)";
                 }
 
-                if (action.ReturnTypeName == null)
-                {
-                    if (config.UseResponseWrapper)
-                    {
-                        source.AppendLine($"using var result = {callStatement}");
-                        source.AppendLine($"return new Response(result.StatusCode);");
-                    }
-                    else
-                    {
-                        source.AppendLine(callStatement);
-                    }
+                if (action.ReturnTypeName == null) {
+                    source.AppendLine(config.UseResponseWrapper
+                        ? $"return await {config.ResponseWrapperType}.FromResponseTask({callStatement});"
+                        : $"await {callStatement}");
                 }
                 else
                 {
-                    source.AppendLine($"using var result = {callStatement}");
+                    if (byteReturnType || !config.UseResponseWrapper)
+                        source.AppendLine($"using var result = await {callStatement};");
 
                     string readValue;
                     if (byteReturnType)
                     {
                         readValue = "result.Content?.ReadAsByteArrayAsync()";
+                        if (config.UseResponseWrapper)
+                            source.AppendMultipleLines($"""
+                            return new {config.ResponseWrapperType}<{action.ReturnTypeName}>(
+                                result.StatusCode,
+                                await ({readValue} 
+                                        ?? Task.FromResult<{nullableReturnType}>(default)));
+                            """);
+                    }
+                    else if (config.UseResponseWrapper) 
+                    {
+                        readValue = $"{config.ResponseWrapperType}<{action.ReturnTypeName}>.FromResponseTask({callStatement}, cancellationToken: _token)";
                     }
                     else if (string.IsNullOrWhiteSpace(useCustomFormatter))
                     {
@@ -372,14 +356,8 @@ namespace GoLive.Generator.ApiClientGenerator
                         readValue = $"result.Content?.ReadFromJsonAsync<{action.ReturnTypeName}>({useCustomFormatter}, cancellationToken: _token)";
                     }
                     
-                    source.AppendMultipleLines(config.UseResponseWrapper
-                        ? $"""
-                        return new Response<{action.ReturnTypeName}>(
-                            result.StatusCode,
-                            await ({readValue} 
-                                    ?? Task.FromResult<{nullableReturnType}>(default)));
-                        """
-                        : $"return await {readValue};");
+                    if (!byteReturnType || !config.UseResponseWrapper)
+                        source.AppendLine($"return await {readValue};");
                 }
 
                 source.AppendCloseCurlyBracketLine();
@@ -387,6 +365,13 @@ namespace GoLive.Generator.ApiClientGenerator
 
             source.AppendCloseCurlyBracketLine();
         }
+
+        private static string ReplaceRouteParams(string routeValue, ActionRoute action, ControllerRoute controller)
+            => Regex.Replace(
+                routeValue.Replace("[area]",       controller.Area)
+                         .Replace("[controller]", controller.Name)
+                         .Replace("[action]",     action.Name),
+                @"{(?<parameter>[^}:]+)(:[^}]+)}", "{${parameter}}");
 
         private static string GetDefaultValue(Parameter argParameter)
         {
@@ -428,22 +413,29 @@ namespace GoLive.Generator.ApiClientGenerator
 
             source.AppendCloseCurlyBracketLine();
             
-            if (config.UseResponseWrapper)
+            if (config.IncludeResponseWrapper)
             {
-                source.AppendLine("public class Response");
+                source.AppendLine($"public class {config.ResponseWrapperType}");
                 source.AppendOpenCurlyBracketLine();
-                source.AppendLine("public Response() {}");
-                source.AppendLine("public Response(HttpStatusCode statusCode)");
+                source.AppendLine($"public {config.ResponseWrapperType}() {{}}");
+                source.AppendLine($"public {config.ResponseWrapperType}(HttpStatusCode statusCode)");
                 source.AppendOpenCurlyBracketLine();
                 source.AppendLine("StatusCode = statusCode;");
                 source.AppendCloseCurlyBracketLine();
                 source.AppendLine("public HttpStatusCode StatusCode { get; }");
                 source.AppendLine("public bool Success => ((int)StatusCode >= 200) && ((int)StatusCode <= 299);");
+                source.AppendMultipleLines($$"""
+                    public static async Task<{{config.ResponseWrapperType}}> FromResponseTask(Task<HttpResponseMessage> responseTask) {
+                        using HttpResponseMessage message = await responseTask;
+                        return new(message.StatusCode);
+                    }
+                    """);
                 source.AppendCloseCurlyBracketLine();
-                source.AppendLine("public class Response<T> : Response");
+
+                source.AppendLine($"public class {config.ResponseWrapperType}<T> : {config.ResponseWrapperType}");
                 source.AppendOpenCurlyBracketLine();
-                source.AppendLine("public Response() {}");
-                source.AppendLine("public Response(HttpStatusCode statusCode, T? data) : base(statusCode)");
+                source.AppendLine($"public {config.ResponseWrapperType}() {{}}");
+                source.AppendLine($"public {config.ResponseWrapperType}(HttpStatusCode statusCode, T? data) : base(statusCode)");
                 source.AppendOpenCurlyBracketLine();
                 source.AppendLine("Data = data;");
                 source.AppendCloseCurlyBracketLine();
@@ -458,6 +450,15 @@ namespace GoLive.Generator.ApiClientGenerator
                 source.AppendLine("data = Data;");
                 source.AppendLine("return Success && data is not null;");
                 source.AppendCloseCurlyBracketLine();
+                source.AppendMultipleLines($$"""
+                    public static async Task<{{config.ResponseWrapperType}}<T>> FromResponseTask(
+                        Task<HttpResponseMessage> responseTask, JsonSerializerOptions? options = null, CancellationToken cancellationToken = default) {
+                        using HttpResponseMessage message = await responseTask;
+                        return new(message.StatusCode, 
+                            await (message.Content?.ReadFromJsonAsync<T>(options, cancellationToken: cancellationToken)
+                            ?? Task.FromResult<T?>(default)));
+                    }
+                    """);
                 source.AppendCloseCurlyBracketLine();
             }
         }

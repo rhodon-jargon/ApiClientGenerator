@@ -10,11 +10,13 @@
   ],
   "PostAppendLines": [
     "// ReSharper disable All"
-  ] ,
+  ],
   "HideUrlsRegex": [
     "^/_]*",
     "^_]*"
   ],
-  "PrefixUrl" : "/api",
-  "UseResponseWrapper" : true
+  "PrefixUrl": "/api",
+  "UseResponseWrapper": true,
+  "IncludeResponseWrapper": true,
+  "ResponseWrapperType": "Result"
 }

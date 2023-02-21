@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Net.Http;
 using Microsoft.CodeAnalysis;
@@ -10,6 +11,14 @@ namespace GoLive.Generator.ApiClientGenerator
 {
     public static class Scanner
     {
+        private static readonly SymbolDisplayFormat displayFormat = new(
+            globalNamespaceStyle: SymbolDisplayGlobalNamespaceStyle.Included,
+            typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
+            genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,
+            miscellaneousOptions: SymbolDisplayMiscellaneousOptions.EscapeKeywordIdentifiers
+                                | SymbolDisplayMiscellaneousOptions.UseSpecialTypes
+                                | SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
         public static bool CanBeController(SyntaxNode node)
             => node is ClassDeclarationSyntax c
                // Don't generate routes for abstract controllers
@@ -40,10 +49,10 @@ namespace GoLive.Generator.ApiClientGenerator
             
             // Extract the route from the HttpActionAttribute
             var attribute = FindAttribute(classSymbol, a => a.ToString() == "Microsoft.AspNetCore.Mvc.RouteAttribute");
-            var route = attribute?.ConstructorArguments.FirstOrDefault().Value?.ToString() ?? string.Empty;
+            var route = attribute?.ConstructorArguments.FirstOrDefault().Value?.ToString();
 
             var areaAttribute = FindAttribute(classSymbol, a => a.ToString() == "Microsoft.AspNetCore.Mvc.AreaAttribute");
-            var area = areaAttribute?.ConstructorArguments.FirstOrDefault().Value?.ToString() ?? null;
+            var area = areaAttribute?.ConstructorArguments.FirstOrDefault().Value?.ToString();
 
             return new ControllerRoute(name, area, route, actionMethods);
         }
@@ -66,10 +75,7 @@ namespace GoLive.Generator.ApiClientGenerator
                     var returnType = methodSymbol.ReturnType;
 
                     // Unwrap Task<T>
-                    if (returnType is INamedTypeSymbol taskType && taskType.OriginalDefinition.ToString() == "System.Threading.Tasks.Task<TResult>")
-                    {
-                        returnType = taskType.TypeArguments.First();
-                    }
+                    returnType = UnwrapTaskTypes(returnType);
 
                     // Take unwrapped T and check whether we need to 
                     // unwrap further to V when T = ActionResult<V>
@@ -86,7 +92,7 @@ namespace GoLive.Generator.ApiClientGenerator
 
                     // Extract the route from the HttpActionAttribute
                     var attribute = FindAttribute(methodSymbol, a => a.BaseType?.ToString() == "Microsoft.AspNetCore.Mvc.Routing.HttpMethodAttribute");
-                    var route = attribute?.ConstructorArguments.FirstOrDefault().Value?.ToString() ?? string.Empty;
+                    var route = attribute?.ConstructorArguments.FirstOrDefault().Value?.ToString();
                     var method = attribute?.AttributeClass?.Name switch
                     {
                         "HttpGetAttribute" => HttpMethod.Get,
@@ -101,23 +107,35 @@ namespace GoLive.Generator.ApiClientGenerator
 
                     if (routeAttr != null)
                     {
-                        route = routeAttr.ConstructorArguments.FirstOrDefault().Value.ToString() ?? string.Empty;
+                        route = routeAttr.ConstructorArguments.FirstOrDefault().Value?.ToString();
                     }
 
                     var customFormatterAttribute = FindAttribute(methodSymbol, a => a.Name == "FormFormatterAttribute");
 
                     bool useCustomFormatter = customFormatterAttribute != null;
 
+                    var parameterAttributes = methodSymbol.Parameters
+                                                          .Select(p => (p,
+                                                               attrs: p.GetAttributes().Select(a => a.AttributeClass?.Name).Where(n => n is not null)))
+                                                          .Where(t => t.Item2.All(a => a != "FromServicesAttribute"))
+                                                          .ToImmutableArray();
+                    var parameters = parameterAttributes
+                                    .Select(t => t.p)
+                                    .Select(p => new ParameterMapping(p.Name,
+                                         new Parameter(p.Type.ToString(), p.HasExplicitDefaultValue,
+                                             p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null)))
+                                    .ToArray();
 
-                    var parameters = methodSymbol.Parameters.Where(t => true)
-                        .Select(delegate(IParameterSymbol t) { return new ParameterMapping(t.Name, new Parameter(t.Type.ToString(), t.HasExplicitDefaultValue, t.HasExplicitDefaultValue ? t.ExplicitDefaultValue : null)); })
-                        .ToArray();
-                    var bodyParameter = methodSymbol.Parameters.Where(t => (!IsPrimitive(t.Type)) || t.GetAttributes().Any(e => e.AttributeClass?.Name == "FromBodyAttribute"))
-                        .Select(t => new ParameterMapping(t.Name, new Parameter(t.Type.ToString(), t.HasExplicitDefaultValue, t.HasExplicitDefaultValue ? t.ExplicitDefaultValue : null)))
-                        .FirstOrDefault();
-
+                    var bodyParameter = parameterAttributes
+                                       .Where(t => !IsPrimitive(t.p.Type) || t.attrs.Any(a => a == "FromBodyAttribute"))
+                                       .Select(t => t.p)
+                                       .Select(p => new ParameterMapping(p.Name,
+                                            new Parameter(p.Type.ToString(), p.HasExplicitDefaultValue,
+                                                p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null)))
+                                       .FirstOrDefault();
+                    
                     yield return new ActionRoute(name, method, route,
-                        returnType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), returnType?.IsReferenceType != true,
+                        returnType?.ToDisplayString(displayFormat), returnType?.IsReferenceType != true,
                         useCustomFormatter, parameters, bodyParameter);
                 }
             }
@@ -175,10 +193,59 @@ namespace GoLive.Generator.ApiClientGenerator
             return false;
         }
 
+        private static ITypeSymbol UnwrapTaskTypes(ITypeSymbol type) {
+            if (type is not INamedTypeSymbol taskType)
+                return type;
 
+            return taskType.OriginalDefinition.ToString() is 
+                        "System.Threading.Tasks.Task<TResult>"
+                     or "System.Threading.Tasks.ValueTask<TResult>" 
+                ? taskType.TypeArguments.First() : type;
+        }
+
+        private static AttributeData? FindAttribute(INamedTypeSymbol symbol, Func<INamedTypeSymbol, bool> selectAttribute)
+            => symbol.GetAttributesWithInherited()
+                .FirstOrDefault(a => a?.AttributeClass != null && selectAttribute(a.AttributeClass));
+        
         private static AttributeData? FindAttribute(ISymbol symbol, Func<INamedTypeSymbol, bool> selectAttribute)
-            => symbol
-                .GetAttributes()
-                .LastOrDefault(a => a?.AttributeClass != null && selectAttribute(a.AttributeClass));
+            => symbol.GetAttributes()
+                .FirstOrDefault(a => a?.AttributeClass != null && selectAttribute(a.AttributeClass));
+
+        private static IEnumerable<AttributeData> GetAllBaseTypeAttributes(this INamedTypeSymbol typeSymbol) {
+            IEnumerable<AttributeData> attributes = typeSymbol.GetAttributes();
+            while ((typeSymbol = typeSymbol.BaseType) is not null) {
+                attributes = attributes.Concat(typeSymbol.GetAttributes());
+            }
+
+            return attributes;
+        }
+        
+        public static IEnumerable<AttributeData> GetAttributesWithInherited(this INamedTypeSymbol typeSymbol) {
+            ImmutableArray<AttributeData> attributes = typeSymbol.GetAttributes();
+            return typeSymbol.BaseType is not null
+                ? attributes.Concat(typeSymbol.BaseType.GetAllBaseTypeAttributes().Where(a => a.IsInherited()))
+                : attributes;
+        }
+
+        private static bool IsInherited(this AttributeData attribute) {
+            if (attribute.AttributeClass == null) {
+                return false;
+            }
+
+            foreach (var attributeAttribute in attribute.AttributeClass.GetAttributes()) {
+                var @class = attributeAttribute.AttributeClass;
+                if (@class is { Name: nameof(AttributeUsageAttribute), ContainingNamespace.Name: "System" }) {
+                    foreach (KeyValuePair<string, TypedConstant> kvp in attributeAttribute.NamedArguments) {
+                        if (kvp.Key == nameof(AttributeUsageAttribute.Inherited))
+                            return (bool)kvp.Value.Value!;
+                    }
+
+                    // Default value of Inherited is true
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 }
