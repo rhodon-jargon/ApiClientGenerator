@@ -1,8 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -44,8 +47,19 @@ namespace GoLive.Generator.ApiClientGenerator
                 ? classSymbol.Name.Substring(0, classSymbol.Name.Length - suffix.Length)
                 : classSymbol.Name;
 
-            var actionMethods = ScanForActionMethods(classSymbol)
-                .ToArray();
+            var actionMethods = ScanForActionMethods(classSymbol).ToList();
+
+            var parentClass = classSymbol.BaseType;
+
+            if (parentClass != null && !parentClass.ToDisplayString(displayFormat).StartsWith("Microsoft.AspNetCore.Mvc", StringComparison.InvariantCultureIgnoreCase))
+            {
+                var addRoutes = ConvertToRoute(parentClass);
+
+                if (addRoutes != null && addRoutes.Actions.Any())
+                {
+                    actionMethods.AddRange(addRoutes.Actions);
+                }
+            }
             
             // Extract the route from the HttpActionAttribute
             var attribute = FindAttribute(classSymbol, a => a.ToString() == "Microsoft.AspNetCore.Mvc.RouteAttribute");
@@ -53,8 +67,7 @@ namespace GoLive.Generator.ApiClientGenerator
 
             var areaAttribute = FindAttribute(classSymbol, a => a.ToString() == "Microsoft.AspNetCore.Mvc.AreaAttribute");
             var area = areaAttribute?.ConstructorArguments.FirstOrDefault().Value?.ToString();
-
-            return new ControllerRoute(name, area, route, actionMethods);
+            return new ControllerRoute(name, area, route, actionMethods.ToArray());
         }
 
         private static IEnumerable<ActionRoute> ScanForActionMethods(INamedTypeSymbol classSymbol)
@@ -147,8 +160,6 @@ namespace GoLive.Generator.ApiClientGenerator
         private static bool InheritsFrom(INamedTypeSymbol classDeclaration, string qualifiedBaseTypeName)
         {
             var currentDeclared = classDeclaration;
-            var displayFormat = new SymbolDisplayFormat(
-                    typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces);
 
             while (currentDeclared.BaseType != null)
             {

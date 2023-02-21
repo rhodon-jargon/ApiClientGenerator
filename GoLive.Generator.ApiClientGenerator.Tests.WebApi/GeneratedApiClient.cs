@@ -16,9 +16,12 @@ namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated
     {
         public ApiClient(HttpClient client)
         {
+            InheritingUser2 = new InheritingUser2Client(client);
             User = new UserClient(client);
             WeatherForecast = new WeatherForecastClient(client);
         }
+
+        public InheritingUser2Client InheritingUser2 { get; }
 
         public UserClient User { get; }
 
@@ -60,6 +63,16 @@ namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated
             return new(message.StatusCode, 
                 await (message.Content?.ReadFromJsonAsync<T>(options, cancellationToken: cancellationToken)
                 ?? Task.FromResult<T?>(default)));
+        }
+    }
+
+    public class InheritingUser2Client
+    {
+        private readonly HttpClient _client;
+
+        public InheritingUser2Client (HttpClient client)
+        {
+            _client = client;
         }
     }
 
