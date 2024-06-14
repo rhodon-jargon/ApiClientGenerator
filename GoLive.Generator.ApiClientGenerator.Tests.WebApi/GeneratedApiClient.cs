@@ -74,6 +74,26 @@ namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated
         {
             _client = client;
         }
+
+        public async Task<Result<global::System.Collections.Generic.IEnumerable<string>>> Get(CancellationToken _token = default)
+        {
+            return await Result<global::System.Collections.Generic.IEnumerable<string>>.FromResponseTask(_client.GetAsync($"/apiInheritingUser2", cancellationToken: _token), cancellationToken: _token);
+        }
+
+        public async Task<Result<string?>> GetUser(int userId , CancellationToken _token = default)
+        {
+            return await Result<string?>.FromResponseTask(_client.GetAsync($"/apiInheritingUser2/{userId}", cancellationToken: _token), cancellationToken: _token);
+        }
+
+        public async Task<Result> Log(int? userId , CancellationToken _token = default)
+        {
+            return await Result.FromResponseTask(_client.GetAsync($"/apiInheritingUser2/{userId}", cancellationToken: _token));
+        }
+
+        public async Task<Result<int>> GetUser(string user , CancellationToken _token = default)
+        {
+            return await Result<int>.FromResponseTask(_client.PostAsJsonAsync($"/apiInheritingUser2", user, cancellationToken: _token), cancellationToken: _token);
+        }
     }
 
     public class UserClient
@@ -95,9 +115,9 @@ namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated
             return await Result<string?>.FromResponseTask(_client.GetAsync($"/api/User/{userId}", cancellationToken: _token), cancellationToken: _token);
         }
 
-        public async Task<Result<global::System.Threading.Tasks.Task>> Log(int userId , CancellationToken _token = default)
+        public async Task<Result> Log(int? userId , CancellationToken _token = default)
         {
-            return await Result<global::System.Threading.Tasks.Task>.FromResponseTask(_client.GetAsync($"/api/User/{userId}", cancellationToken: _token), cancellationToken: _token);
+            return await Result.FromResponseTask(_client.GetAsync($"/api/User/{userId}", cancellationToken: _token));
         }
 
         public async Task<Result<int>> GetUser(string user , CancellationToken _token = default)
@@ -137,10 +157,7 @@ namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated
         public async Task<Result<global::GoLive.Generator.ApiClientGenerator.Tests.WebApi.WeatherForecast>> GetSingle(int Id , CancellationToken _token = default)
         {
             Dictionary<string, string> queryString=new();
-            if (Id != default)
-            {
-                queryString.Add("Id", Id.ToString());
-            }
+            queryString.Add("Id", Id.ToString());
             return await Result<global::GoLive.Generator.ApiClientGenerator.Tests.WebApi.WeatherForecast>.FromResponseTask(_client.GetAsync(Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString($"/apiWeatherForecast", queryString), cancellationToken: _token), cancellationToken: _token);
         }
     }

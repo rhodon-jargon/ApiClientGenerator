@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using System.Diagnostics;
+using ApiClientGenerator;
+using Microsoft.AspNetCore.Mvc;
 
 namespace GoLive.Generator.ApiClientGenerator.Tests.WebApi.Controllers;
 
@@ -21,12 +23,20 @@ public class UserController : ApiController
     [HttpGet("{userId:int}")]
     public string? GetUser(int userId) => userId >= 0 && userId < users.Count ? users[userId] : null;
 
-    [HttpGet("{userId:int}")]
-    public Task Log(int userId, [FromServices] ILogger<UserController> logger) =>
-        Task.CompletedTask; 
+    [HttpGet("{userId:int?}")]
+    public void Log(int? userId, [FromServices] ILogger<UserController> logger) {
+        logger.LogDebug($"Log from {userId}");
+    }
 
     [HttpPost]
     public int GetUser([FromBody] string user) {
+        int id = users.Count;
+        users.Add(user);
+        return id;
+    }
+    
+    [HttpPost, ApiClientGeneratorIgnore]
+    public int GetUser2([FromBody] string user) {
         int id = users.Count;
         users.Add(user);
         return id;

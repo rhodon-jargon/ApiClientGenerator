@@ -22,5 +22,9 @@ namespace GoLive.Generator.ApiClientGenerator
         public bool UseResponseWrapper { get; set; }
         public bool IncludeResponseWrapper { get; set; }
         public string ResponseWrapperType { get; set; }
+
+        public string QueryStringBuilder { get; set; }
+        public string QueryStringDictionary { get; set; }
+        public string QueryStringFormat { get; set; }
     }
 }

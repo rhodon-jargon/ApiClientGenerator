@@ -7,6 +7,8 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
+using GoLive.Generator.ApiClientGenerator.Data;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -17,12 +19,14 @@ namespace GoLive.Generator.ApiClientGenerator
     public class ApiClientGenerator : IIncrementalGenerator//, ISourceGenerator
     {
         public void Initialize(IncrementalGeneratorInitializationContext context) {
+            context.RegisterPostInitializationOutput(ctx
+                => ctx.AddSource(nameof(ApiClientGeneratorIgnoreAttribute), ApiClientGeneratorIgnoreAttribute));
+
             IncrementalValuesProvider<ControllerRoute> controllerDeclarations = context.SyntaxProvider
                .CreateSyntaxProvider(
                     predicate: static (s, _) => Scanner.CanBeController(s), 
                     transform: static (ctx, _) => GetControllerDeclarations(ctx))
-               .Where(static c => c is not null)
-               .Select(static (c, _) => Scanner.ConvertToRoute(c));
+               .Where(static c => c is not null);
 
             var configFiles = context.AdditionalTextsProvider.Where(IsConfigurationFile);
             var controllersAndConfig = controllerDeclarations.Collect().Combine(configFiles.Collect());
@@ -30,22 +34,30 @@ namespace GoLive.Generator.ApiClientGenerator
                 static (spc, source) => Execute(source.Left, source.Right, spc));
         }
 
-        private static INamedTypeSymbol GetControllerDeclarations(GeneratorSyntaxContext context)
+        private static ControllerRoute GetControllerDeclarations(GeneratorSyntaxContext context)
         {
             // we know the node is a ClassDeclarationSyntax thanks to CanBeController
             var classDeclarationSyntax = (ClassDeclarationSyntax)context.Node;
 
             var symbol = context.SemanticModel.GetDeclaredSymbol(classDeclarationSyntax);
-            return symbol is not null && Scanner.IsController(symbol) ? symbol : null;
+            return symbol is not null && Scanner.IsController(symbol) ? Scanner.ConvertToRoute(symbol) : null;
         }
 
         private static bool IsConfigurationFile(AdditionalText text)
             => text.Path.EndsWith("ApiClientGenerator.json");
         
-        public static void Execute(
+        internal static void Execute(
             ImmutableArray<ControllerRoute> controllerRoutes,
             IEnumerable<AdditionalText> configurationFiles, SourceProductionContext context) 
         {
+            #if DEBUG
+
+            File.WriteAllLines("GeneratedRoutes.txt",
+                controllerRoutes.Select(r
+                    => $"{r.Area}/{r.BaseRoute}/{r.Name} [{string.Join(",\n\t", r.Actions.Select(a => $"{a.ReturnTypeName ?? "Void"} {a.Name} {a.Method}"))}]"));
+
+            #endif
+
             var config = LoadConfig(configurationFiles);
 
             var source = new SourceStringBuilder();
@@ -185,7 +197,9 @@ namespace GoLive.Generator.ApiClientGenerator
             {
                 bool byteReturnType = action.ReturnTypeName == "byte[]";
 
-                var parameterList = string.Join(", ", action.Mapping.Select(m => $"{m.Parameter.FullTypeName} {m.Key} {GetDefaultValue(m.Parameter)}"));
+                var parameterList = string.Join(", ",
+                    action.Mapping!.Select(m =>
+                        $"{m.Parameter.FullTypeName} {m.Key} {GetDefaultValueSetter(m.Parameter)}"));
 
                 bool containsFileUpload = action.Mapping.Any(f => f.Parameter.FullTypeName == "Microsoft.AspNetCore.Http.IFormFile");
 
@@ -194,7 +208,7 @@ namespace GoLive.Generator.ApiClientGenerator
                         action.Mapping.Select(m =>
                             m.Parameter.FullTypeName == "Microsoft.AspNetCore.Http.IFormFile"
                                 ? "System.Net.Http.MultipartFormDataContent multiPartContent"
-                                : $"{m.Parameter.FullTypeName} {m.Key} {GetDefaultValue(m.Parameter)}"));
+                                : $"{m.Parameter.FullTypeName} {m.Key} {GetDefaultValueSetter(m.Parameter)}"));
                 }
 
                 string useCustomFormatter = config.CustomDiscriminator;
@@ -249,25 +263,30 @@ namespace GoLive.Generator.ApiClientGenerator
                     .Where(m => !routeValue.Contains($"{{{m.Key}}}") && action.Body?.Key != m.Key).ToList();
                 if (queryStringParams.Count > 0)
                 {
-                    source.AppendLine("Dictionary<string, string> queryString=new();");
+                    source.AppendLine($"{config.QueryStringDictionary ?? "Dictionary<string, string>"} queryString=new();");
+                    var format = config.QueryStringFormat ?? (config.QueryStringDictionary is null
+                        ? ".ToString()"
+                        : null);
 
-                    foreach (var parameterMapping in queryStringParams)
+                    foreach (ParameterMapping parameterMapping in queryStringParams)
                     {
-                        if (parameterMapping.Parameter.FullTypeName == "string")
-                        {
-                            source.AppendLine($"if (!string.IsNullOrWhiteSpace({parameterMapping.Key}))");
-                        }
-                        else
-                        {
-                            source.AppendLine($"if ({parameterMapping.Key} != default)");
+                        if (parameterMapping.Parameter.HasDefaultValue) {
+                            source.AppendLine(
+                                $"if ({parameterMapping.Key} != {GetDefaultValue(parameterMapping.Parameter)})");
+
+                            source.AppendOpenCurlyBracketLine();
                         }
 
-                        source.AppendOpenCurlyBracketLine();
-                        source.AppendLine($"queryString.Add(\"{parameterMapping.Key}\", {parameterMapping.Key}.ToString());");
-                        source.AppendCloseCurlyBracketLine();
+                        var parameterFormatter = parameterMapping.Parameter.IsEnum ? ".ToString()" : format;
+                        source.AppendLine($"queryString.Add(\"{parameterMapping.Key}\", {parameterMapping.Key}{parameterFormatter});");
+
+                        if (parameterMapping.Parameter.HasDefaultValue)
+                            source.AppendCloseCurlyBracketLine();
                     }
 
-                    routeString = $"Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString({routeString}, queryString)";
+                    string queryStringBuilder = config.QueryStringBuilder
+                                             ?? "Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString";
+                    routeString = $"{queryStringBuilder}({routeString}, queryString)";
                 }
 
 
@@ -350,21 +369,17 @@ namespace GoLive.Generator.ApiClientGenerator
                          .Replace("[action]",     action.Name),
                 @"{(?<parameter>[^}:]+)(:[^}]+)}", "{${parameter}}");
 
-        private static string GetDefaultValue(Parameter argParameter)
-        {
-            if (argParameter.HasDefaultValue)
-            {
-                return argParameter.DefaultValue switch
-                {
-                    null => " = null",
-                    bool b => $" = {b.ToString().ToLower()}",
-                    string e => " = \"\"",
-                    _ => $" = {argParameter.DefaultValue}"
-                };
-            }
+        private static string GetDefaultValueSetter(Parameter argParameter)
+            => argParameter.HasDefaultValue ? " = " + GetDefaultValue(argParameter) : string.Empty;
 
-            return string.Empty;
-        }
+        private static string GetDefaultValue(Parameter argParameter)
+            => argParameter.DefaultValue switch
+            {
+                null     => "null",
+                bool b   => b.ToString().ToLower(),
+                string e => SymbolDisplay.FormatLiteral(e, true),
+                _        => argParameter.DefaultValue.ToString()
+            };
 
         private static void SetUpApiClient(RouteGeneratorSettings config, IEnumerable<ControllerRoute> routes, SourceStringBuilder source)
         {
@@ -439,5 +454,14 @@ namespace GoLive.Generator.ApiClientGenerator
                 source.AppendCloseCurlyBracketLine();
             }
         }
+
+        private const string ApiClientGeneratorIgnoreAttribute = """
+             namespace ApiClientGenerator
+             {
+                 public class ApiClientGeneratorIgnoreAttribute : System.Attribute { }
+             }
+             """;
+
+        public const string ApiClientGeneratorIgnoreAttributeNamespace = "ApiClientGenerator.ApiClientGeneratorIgnoreAttribute";
     }
 }
