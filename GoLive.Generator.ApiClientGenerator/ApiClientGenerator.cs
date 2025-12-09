@@ -16,7 +16,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace GoLive.Generator.ApiClientGenerator
 {
     [Generator]
-    public class ApiClientGenerator : IIncrementalGenerator//, ISourceGenerator
+    public class ApiClientGenerator : IIncrementalGenerator
     {
         public void Initialize(IncrementalGeneratorInitializationContext context) {
             context.RegisterPostInitializationOutput(ctx
@@ -128,7 +128,7 @@ namespace GoLive.Generator.ApiClientGenerator
         private static void SaveSourceToFile(RouteGeneratorSettings config, SourceStringBuilder source)
         {
             var content = source.ToString();
-            if (config.OutputFiles != null && config.OutputFiles.Count > 0)
+            if (config.OutputFiles is { Count: > 0 })
             {
                 foreach (var configOutputFile in config.OutputFiles)
                 {
@@ -193,6 +193,10 @@ namespace GoLive.Generator.ApiClientGenerator
             source.AppendLine("_client = client;");
             source.AppendCloseCurlyBracketLine();
 
+            var formatterArg = string.IsNullOrEmpty(config.CustomDiscriminator)
+                ? null
+                : $"{config.CustomDiscriminator}, ";
+
             foreach (var action in controllerRoute.Actions)
             {
                 bool byteReturnType = action.ReturnTypeName == "byte[]";
@@ -210,8 +214,6 @@ namespace GoLive.Generator.ApiClientGenerator
                                 ? "System.Net.Http.MultipartFormDataContent multiPartContent"
                                 : $"{m.Parameter.FullTypeName} {m.Key} {GetDefaultValueSetter(m.Parameter)}"));
                 }
-
-                string useCustomFormatter = config.CustomDiscriminator;
 
                 string routeValue = action.Route switch {
                     { Length: > 0 } route when route[0] is '/' or '~' => route,
@@ -301,12 +303,11 @@ namespace GoLive.Generator.ApiClientGenerator
 
                 if (containsFileUpload)
                 {
-                    callStatement = $"_client.{methodString}Async({routeString}, multiPartContent, cancellationToken: _token)";
+                    callStatement = $"_client.{methodString}Async({routeString}, multiPartContent, {formatterArg}cancellationToken: _token)";
                 }
                 else if (action.Body is { Key: var key }) {
-                    callStatement = string.IsNullOrWhiteSpace(useCustomFormatter)
-                        ? $"_client.{methodString}AsJsonAsync({routeString}, {key}, cancellationToken: _token)"
-                        : $"_client.{methodString}AsJsonAsync({routeString}, {key}, {useCustomFormatter}, cancellationToken: _token)";
+                    callStatement =
+                        $"_client.{methodString}AsJsonAsync({routeString}, {key}, {formatterArg}cancellationToken: _token)";
                 }
                 else if (methodString == "Post")
                 {
@@ -339,17 +340,13 @@ namespace GoLive.Generator.ApiClientGenerator
                                         ?? Task.FromResult<{nullableReturnType}>(default)));
                             """);
                     }
-                    else if (config.UseResponseWrapper) 
-                    {
-                        readValue = $"{config.ResponseWrapperType}<{action.ReturnTypeName}>.FromResponseTask({callStatement}, cancellationToken: _token)";
-                    }
-                    else if (string.IsNullOrWhiteSpace(useCustomFormatter))
-                    {
-                        readValue = $"result.Content?.ReadFromJsonAsync<{action.ReturnTypeName}>(cancellationToken: _token)";
+                    else if (config.UseResponseWrapper) {
+                        readValue =
+                            $"{config.ResponseWrapperType}<{action.ReturnTypeName}>.FromResponseTask({callStatement}, {formatterArg}cancellationToken: _token)";
                     }
                     else
                     {
-                        readValue = $"result.Content?.ReadFromJsonAsync<{action.ReturnTypeName}>({useCustomFormatter}, cancellationToken: _token)";
+                        readValue = $"result.Content?.ReadFromJsonAsync<{action.ReturnTypeName}>({formatterArg}cancellationToken: _token)";
                     }
                     
                     if (!byteReturnType || !config.UseResponseWrapper)
@@ -375,7 +372,7 @@ namespace GoLive.Generator.ApiClientGenerator
         private static string GetDefaultValue(Parameter argParameter)
             => argParameter.DefaultValue switch
             {
-                null     => "null",
+                null     => "default",
                 bool b   => b.ToString().ToLower(),
                 string e => SymbolDisplay.FormatLiteral(e, true),
                 _        => argParameter.DefaultValue.ToString()
@@ -384,7 +381,7 @@ namespace GoLive.Generator.ApiClientGenerator
         private static void SetUpApiClient(RouteGeneratorSettings config, IEnumerable<ControllerRoute> routes, SourceStringBuilder source)
         {
             source.AppendLine();
-            source.AppendLine("public class ApiClient");
+            source.AppendLine("public partial class ApiClient");
             source.AppendOpenCurlyBracketLine();
 
             source.AppendLine("public ApiClient(HttpClient client)");
