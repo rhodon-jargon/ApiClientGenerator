@@ -1,7 +1,7 @@
 ﻿{
   "OutputFile": "GeneratedApiClient.cs",
   "Namespace": "GoLive.Generator.ApiClientGenerator.Tests.WebApi.Generated",
-  "CustomDiscriminator": "",
+  "CustomDiscriminator": null,
   "Includes": [
     "GoLive.Generator.ApiClientGenerator"
   ],
@@ -18,5 +18,11 @@
   "PrefixUrl": "/api",
   "UseResponseWrapper": true,
   "IncludeResponseWrapper": true,
-  "ResponseWrapperType": "Result"
+  "ResponseWrapperType": "Result",
+  "GenerateInterface": true,
+  "GenerateServerImplementation": true,
+  "ServerImplementationNamespace": "GoLive.Generator.ApiClientGenerator.Tests.WebApi",
+  "ServerImplementationTransformParameterTypes": [
+    "int"
+  ]
 }

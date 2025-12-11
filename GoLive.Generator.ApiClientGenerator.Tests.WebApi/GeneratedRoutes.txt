@@ -1,0 +1,12 @@
+/[controller]/WeatherForecast [global::System.Collections.Generic.IEnumerable<global::GoLive.Generator.ApiClientGenerator.Tests.WebApi.WeatherForecast> Get GET (),
+	async Void SecretUrl GET (),
+	async byte[] GetBytes GET (),
+	global::GoLive.Generator.ApiClientGenerator.Tests.WebApi.WeatherForecast GetSingle GET (int Id)]
+//[controller]/User [global::System.Collections.Generic.IEnumerable<string> Get GET (),
+	string? GetUser GET (int userId),
+	Void Log GET (int? userId, [FromServices] Microsoft.Extensions.Logging.ILogger<GoLive.Generator.ApiClientGenerator.Tests.WebApi.Controllers.UserController> logger),
+	int GetUser POST (string user)]
+/[controller]/InheritingUser2 [global::System.Collections.Generic.IEnumerable<string> Get GET (),
+	string? GetUser GET (int userId),
+	Void Log GET (int? userId, [FromServices] Microsoft.Extensions.Logging.ILogger<GoLive.Generator.ApiClientGenerator.Tests.WebApi.Controllers.UserController> logger),
+	int GetUser POST (string user)]

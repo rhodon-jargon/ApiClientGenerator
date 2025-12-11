@@ -10,12 +10,7 @@ namespace GoLive.Generator.ApiClientGenerator
         private readonly string SingleIndent = new string(' ', 4);
 
         public int IndentLevel = 0;
-        private readonly StringBuilder _stringBuilder;
-
-        public SourceStringBuilder()
-        {
-            _stringBuilder = new StringBuilder();
-        }
+        private readonly StringBuilder _stringBuilder = new();
 
         public void IncreaseIndent()
         {
@@ -74,6 +69,17 @@ namespace GoLive.Generator.ApiClientGenerator
         {
             Append(text);
             AppendLine();
+        }
+
+        public void AppendLine(string text, bool indent)
+        {
+            Append(text, indent);
+            AppendLine();
+        }
+
+        public void Clear() {
+            _stringBuilder.Clear();
+            IndentLevel = 0;
         }
 
         public override string ToString()

@@ -1,11 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using GoLive.Generator.ApiClientGenerator.Data;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -15,6 +12,8 @@ namespace GoLive.Generator.ApiClientGenerator;
 
 internal static class Scanner
 {
+    public const string CancellationTokenType = "System.Threading.CancellationToken";
+
     private static readonly SymbolDisplayFormat displayFormat = new(
         globalNamespaceStyle: SymbolDisplayGlobalNamespaceStyle.Included,
         typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
@@ -59,10 +58,8 @@ internal static class Scanner
         {
             var addRoutes = ConvertToRoute(parentClass);
 
-            if (addRoutes != null && addRoutes.Actions.Any())
-            {
+            if (addRoutes.Actions.Any())
                 actionMethods.AddRange(addRoutes.Actions);
-            }
         }
             
         // Extract the route from the HttpActionAttribute
@@ -71,7 +68,7 @@ internal static class Scanner
 
         var areaAttribute = FindAttribute(classSymbol, a => a.ToString() == "Microsoft.AspNetCore.Mvc.AreaAttribute");
         var area = areaAttribute?.ConstructorArguments.FirstOrDefault().Value?.ToString();
-        return new ControllerRoute(name, area, route, new EquatableArray<ActionRoute>(actionMethods.ToArray()));
+        return new ControllerRoute(name, classSymbol.ToDisplayString(displayFormat), area, route, new EquatableArray<ActionRoute>(actionMethods.ToArray()));
     }
 
     private static IEnumerable<ActionRoute> ScanForActionMethods(INamedTypeSymbol classSymbol)
@@ -94,10 +91,10 @@ internal static class Scanner
                     continue;
 
                 var name = methodSymbol.Name;
-                var returnType = methodSymbol.ReturnType;
+                ITypeSymbol? returnType = methodSymbol.ReturnType;
 
                 // Unwrap Task<T>
-                returnType = UnwrapTaskTypes(returnType);
+                bool isAsync = TryUnwrapTaskTypes(returnType, out returnType);
 
                 // Take unwrapped T and check whether we need to 
                 // unwrap further to V when T = ActionResult<V>
@@ -137,33 +134,44 @@ internal static class Scanner
 
                 bool useCustomFormatter = customFormatterAttribute != null;
 
-                var parameterAttributes = methodSymbol.Parameters
-                    .Select(p => (p,
-                        attrs: p.GetAttributes().Select(a => a.AttributeClass?.Name).Where(n => n is not null)))
-                    .Where(t => 
-                        t.p.Type.ToString() != "System.Threading.CancellationToken"
-                        && t.attrs.All(a => a != "FromServicesAttribute"))
-                    .ToImmutableArray();
-                var parameters = parameterAttributes
-                    .Select(t => t.p)
-                    .Select(p => new ParameterMapping(p.Name,
-                        new Parameter(p.Type.ToString(), p.HasExplicitDefaultValue,
-                            p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null, p.Type.TypeKind == TypeKind.Enum)))
-                    .ToArray();
+                var serverParameters = methodSymbol.Parameters
+                                                   .Select(p =>
+                                                        new ServerParameter(p.Type.ToString(),
+                                                            p.Name,
+                                                            p.GetAttributes().Any(a
+                                                                => a.AttributeClass?.Name == "FromServicesAttribute"))
+                                                    ).ToArray();
 
-                var bodyParameter = parameterAttributes
-                    .Where(t
-                        => t.attrs.All(a => a != "FromQueryAttribute" && a != "FromRouteAttribute")
-                           && (!IsPrimitive(t.p.Type) || t.attrs.Any(a => a == "FromBodyAttribute")))
-                    .Select(t => t.p)
-                    .Select(p => new ParameterMapping(p.Name,
-                        new Parameter(p.Type.ToString(), p.HasExplicitDefaultValue,
-                            p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null, p.Type.TypeKind == TypeKind.Enum)))
-                    .FirstOrDefault();
+                ParameterMapping[] parameters =
+                    methodSymbol.Parameters
+                                .Zip(serverParameters, (p, serverParameter)
+                                     => serverParameter.IsService || serverParameter.FullTypeName == CancellationTokenType
+                                         ? null
+                                         : new ParameterMapping(p.Name,
+                                             new Parameter(serverParameter.FullTypeName, p.HasExplicitDefaultValue,
+                                                 p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null,
+                                                 p.Type.TypeKind == TypeKind.Enum)))
+                                .Where(p => p is not null)
+                                .ToArray()!;
+
+                ParameterMapping? bodyParameter =
+                    methodSymbol.Parameters
+                                .Where(p
+                                     => p.GetAttributes().All(a
+                                            => a.AttributeClass?.Name is not ("FromQueryAttribute"
+                                                or "FromRouteAttribute" or "FromServicesAttribute"))
+                                     && (!IsPrimitive(p.Type) || p.GetAttributes()
+                                                                  .Any(a => a.AttributeClass?.Name
+                                                                         == "FromBodyAttribute")))
+                                .Select(p => new ParameterMapping(p.Name,
+                                     new Parameter(p.Type.ToString(), p.HasExplicitDefaultValue,
+                                         p.HasExplicitDefaultValue ? p.ExplicitDefaultValue : null,
+                                         p.Type.TypeKind == TypeKind.Enum)))
+                                .FirstOrDefault();
                     
                 yield return new ActionRoute(name, method, route,
-                    returnType?.ToDisplayString(displayFormat), returnType?.IsReferenceType != true,
-                    useCustomFormatter, new EquatableArray<ParameterMapping>(parameters), bodyParameter);
+                    returnType?.ToDisplayString(displayFormat), returnType?.IsReferenceType != true, IsAsync: isAsync,
+                    useCustomFormatter, new EquatableArray<ParameterMapping>(parameters), bodyParameter, new EquatableArray<ServerParameter>(serverParameters));
             }
         }
     }
@@ -227,17 +235,23 @@ internal static class Scanner
         }
     }
 
-    private static ITypeSymbol UnwrapTaskTypes(ITypeSymbol type) {
+    private static bool TryUnwrapTaskTypes(ITypeSymbol type, out ITypeSymbol? unwrappedType) {
+        unwrappedType = type;
+
         if (type is not INamedTypeSymbol namedType)
-            return type;
+            return false;
 
-        if (namedType.ToString() is "System.Threading.Tasks.Task" or "System.Threading.Tasks.ValueTask")
-            return null;
+        if (namedType.ToString() is "System.Threading.Tasks.Task" or "System.Threading.Tasks.ValueTask") {
+            unwrappedType = null;
+            return true;
+        }
 
-        return namedType.OriginalDefinition.ToString() is 
-            "System.Threading.Tasks.Task<TResult>"
-            or "System.Threading.Tasks.ValueTask<TResult>" 
-            ? namedType.TypeArguments.First() : type;
+        if (namedType.OriginalDefinition.ToString() is not ("System.Threading.Tasks.Task<TResult>"
+            or "System.Threading.Tasks.ValueTask<TResult>"))
+            return false;
+
+        unwrappedType = namedType.TypeArguments.First();
+        return true;
     }
 
     private static AttributeData? FindAttribute(INamedTypeSymbol symbol, Func<INamedTypeSymbol, bool> selectAttribute)
@@ -251,8 +265,9 @@ internal static class Scanner
 
     private static IEnumerable<AttributeData> GetAllBaseTypeAttributes(this INamedTypeSymbol typeSymbol) {
         IEnumerable<AttributeData> attributes = typeSymbol.GetAttributes();
-        while ((typeSymbol = typeSymbol.BaseType) is not null) {
-            attributes = attributes.Concat(typeSymbol.GetAttributes());
+        INamedTypeSymbol? symbol = typeSymbol;
+        while ((symbol = symbol.BaseType) is not null) {
+            attributes = attributes.Concat(symbol.GetAttributes());
         }
 
         return attributes;
